@@ -51,7 +51,7 @@ static const int HOUR_START        = 9;      // 9 AM
 static const int HOUR_END          = 17;     // 5 PM
 static const int TOTAL_MINUTES     = (HOUR_END - HOUR_START) * 60;  // 480
 
-static const int LABEL_W           = 38;     // Width of hour-label gutter
+static const int LABEL_W           = 48;     // Width of hour-label gutter
 static const int EVENT_X           = LABEL_W + 2;
 static const int EVENT_W           = SCREEN_W - EVENT_X - 4; // ~228px
 
@@ -331,7 +331,7 @@ void drawHeader()
   char dateBuf[40];
   strftime(dateBuf, sizeof(dateBuf), "%A, %B %d", &t);
 
-  display.setFont(&FreeSansBold18pt7b);
+  display.setFont(&FreeSansBold12pt7b);
   display.setTextColor(GxEPD_BLACK);
 
   int16_t tx, ty;
@@ -350,7 +350,8 @@ void drawHeader()
 
 void drawHourGrid()
 {
-  display.setFont(&FreeSans9pt7b);
+  display.setFont();        // Built-in 6×8 font for compact labels
+  display.setTextSize(1);
   display.setTextColor(GxEPD_BLACK);
 
   for (int h = HOUR_START; h <= HOUR_END; h++) {
@@ -361,25 +362,22 @@ void drawHourGrid()
       display.drawPixel(x, y, GxEPD_BLACK);
     }
 
-    // Hour label: "9AM", "10", "11", "12PM", "1", ...
-    if (h == HOUR_END) break;  // Don't label the bottom boundary
+    if (h == HOUR_END) break;    // Don't label the bottom boundary
+    if (h == HOUR_START) continue; // Skip 9am — obvious from context
 
     char label[6];
     if (h == 12) {
-      strcpy(label, "12PM");
+      strcpy(label, "12pm");
     } else if (h < 12) {
-      sprintf(label, "%d AM", h);
+      sprintf(label, "%dam", h);
     } else {
-      sprintf(label, "%d PM", h - 12);
+      sprintf(label, "%dpm", h - 12);
     }
 
-    int16_t tx, ty;
-    uint16_t tw, th;
-    display.getTextBounds(label, 0, 0, &tx, &ty, &tw, &th);
-
-    // Right-align label in the gutter, vertically centered on the gridline
-    int lx = LABEL_W - (int)tw - 3;
-    int ly = y + (int)th / 2;
+    // Built-in font: 6px wide per char, 8px tall
+    int tw = strlen(label) * 6;
+    int lx = LABEL_W - tw - 1;
+    int ly = y - 4;  // vertically center the 8px-tall text on the gridline
     display.setCursor(lx, ly);
     display.print(label);
   }
@@ -388,8 +386,73 @@ void drawHourGrid()
   display.drawFastVLine(LABEL_W, TIMELINE_Y, TIMELINE_H, GxEPD_BLACK);
 }
 
+// Compute overlap columns for timed events.
+// Each timed event gets a column index and a column count.
+static int evCol[MAX_EVENTS];      // column index (0-based)
+static int evColCount[MAX_EVENTS]; // total columns in this overlap group
+
+void computeOverlapColumns()
+{
+  // Collect indices of visible timed events (already sorted by start time)
+  int vis[MAX_EVENTS];
+  int visN = 0;
+  for (int i = 0; i < eventCount; i++) {
+    if (events[i].allDay) continue;
+    int sh = events[i].startHour, sm = events[i].startMin;
+    int eh = events[i].endHour,   em = events[i].endMin;
+    int startMin = sh * 60 + sm;
+    int endMin   = eh * 60 + em;
+    if (endMin <= HOUR_START * 60 || startMin >= HOUR_END * 60) continue;
+    vis[visN++] = i;
+  }
+
+  // Initialize all to column 0, count 1
+  for (int i = 0; i < eventCount; i++) { evCol[i] = 0; evColCount[i] = 1; }
+
+  // For each visible event, find overlapping events and assign columns
+  for (int a = 0; a < visN; a++) {
+    int ai = vis[a];
+    int aStart = events[ai].startHour * 60 + events[ai].startMin;
+    int aEnd   = events[ai].endHour   * 60 + events[ai].endMin;
+
+    // Find all events that overlap with this one
+    bool colUsed[MAX_EVENTS] = {};
+    for (int b = 0; b < a; b++) {
+      int bi = vis[b];
+      int bStart = events[bi].startHour * 60 + events[bi].startMin;
+      int bEnd   = events[bi].endHour   * 60 + events[bi].endMin;
+      if (bStart < aEnd && bEnd > aStart) {
+        colUsed[evCol[bi]] = true;
+      }
+    }
+    // Assign first free column
+    int col = 0;
+    while (colUsed[col]) col++;
+    evCol[ai] = col;
+  }
+
+  // Compute column count per overlap group
+  for (int a = 0; a < visN; a++) {
+    int ai = vis[a];
+    int aStart = events[ai].startHour * 60 + events[ai].startMin;
+    int aEnd   = events[ai].endHour   * 60 + events[ai].endMin;
+    int maxCol = evCol[ai];
+    for (int b = 0; b < visN; b++) {
+      int bi = vis[b];
+      int bStart = events[bi].startHour * 60 + events[bi].startMin;
+      int bEnd   = events[bi].endHour   * 60 + events[bi].endMin;
+      if (bStart < aEnd && bEnd > aStart) {
+        if (evCol[bi] > maxCol) maxCol = evCol[bi];
+      }
+    }
+    evColCount[ai] = maxCol + 1;
+  }
+}
+
 void drawEvents()
 {
+  computeOverlapColumns();
+
   for (int i = 0; i < eventCount; i++) {
     CalEvent &ev = events[i];
 
@@ -409,8 +472,15 @@ void drawEvents()
     int blockH = y2 - y1;
     if (blockH < 2) blockH = 2;
 
+    // Compute column-based X and width
+    int cols = evColCount[i];
+    int col  = evCol[i];
+    int colW = EVENT_W / cols;
+    int ex   = EVENT_X + col * colW;
+    int ew   = (col == cols - 1) ? (EVENT_W - col * colW) : colW; // last col gets remainder
+
     // Draw filled block
-    display.fillRect(EVENT_X, y1, EVENT_W, blockH, GxEPD_BLACK);
+    display.fillRect(ex, y1, ew, blockH, GxEPD_BLACK);
 
     // Draw title (inverted: white on black)
     if (blockH >= 16) {
@@ -418,14 +488,14 @@ void drawEvents()
       display.setTextColor(GxEPD_WHITE);
 
       char truncated[64];
-      truncateToFit(ev.title, EVENT_W - 8, truncated, sizeof(truncated));
+      truncateToFit(ev.title, ew - 8, truncated, sizeof(truncated));
 
       int16_t tx, ty;
       uint16_t tw, th;
       display.getTextBounds(truncated, 0, 0, &tx, &ty, &tw, &th);
 
       int textY = y1 + 3 + (int)th;  // 3px top padding + ascent
-      display.setCursor(EVENT_X + 4, textY);
+      display.setCursor(ex + 4, textY);
       display.print(truncated);
 
       // If block is tall enough, show time range on second line
@@ -436,7 +506,7 @@ void drawEvents()
                 ev.endHour > 12 ? ev.endHour - 12 : ev.endHour, ev.endMin);
 
         display.setFont(&FreeSans9pt7b);
-        display.setCursor(EVENT_X + 4, textY + (int)th + 3);
+        display.setCursor(ex + 4, textY + (int)th + 3);
         display.print(timeBuf);
       }
 
