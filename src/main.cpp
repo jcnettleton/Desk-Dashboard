@@ -275,14 +275,20 @@ bool isRecurringToday(const char* startYMD, const char* rrule,
   if (strcmp(todayYMD, startYMD) < 0) return false;
   if (strcmp(todayYMD, startYMD) == 0) return true;  // start date always fires
 
+  // Detect truncated RRULE (e.g. "FREQ=WEEKLY;UNTI" where UNTIL= was cut off)
+  int rlen = strlen(rrule);
+  const char* lastSemi = strrchr(rrule, ';');
+  if (lastSemi && !strchr(lastSemi, '=')) {
+    Serial.printf("  [WARN] Truncated RRULE (%d chars): %s\n", rlen, rrule);
+    return false;
+  }
+
   // Check UNTIL end date
   const char* u = strstr(rrule, "UNTIL=");
   if (u) {
-    // UNTIL value might be "20260501" or "20260501T000000Z"
     char untilBuf[24];
     strncpy(untilBuf, u + 6, sizeof(untilBuf) - 1);
     untilBuf[sizeof(untilBuf) - 1] = '\0';
-    // Terminate at ';' if present
     char* sc = strchr(untilBuf, ';');
     if (sc) *sc = '\0';
     ICalDT untilDt = parseICalDT(untilBuf);
@@ -297,15 +303,21 @@ bool isRecurringToday(const char* startYMD, const char* rrule,
   if (iv) interval = atoi(iv + 9);
   if (interval < 1) interval = 1;
 
+  // Parse COUNT (0 = unlimited)
+  int count = 0;
+  const char* cv = strstr(rrule, "COUNT=");
+  if (cv) count = atoi(cv + 6);
+
   // --- DAILY ---
   if (strstr(rrule, "FREQ=DAILY")) {
-    if (interval == 1) return true;
-    return daysBetweenYMD(startYMD, todayYMD) % interval == 0;
+    int daysDiff = daysBetweenYMD(startYMD, todayYMD);
+    if (interval > 1 && daysDiff % interval != 0) return false;
+    if (count > 0 && (daysDiff / interval) + 1 > count) return false;
+    return true;
   }
 
   // --- WEEKLY ---
   if (strstr(rrule, "FREQ=WEEKLY")) {
-    // Check day-of-week
     bool dayMatch = false;
     const char* bd = strstr(rrule, "BYDAY=");
     if (bd) {
@@ -320,10 +332,30 @@ bool isRecurringToday(const char* startYMD, const char* rrule,
       dayMatch = (wdayOf(startYMD) == todayWday);
     }
     if (!dayMatch) return false;
-    if (interval == 1) return true;
     int daysDiff = daysBetweenYMD(startYMD, todayYMD);
     int weeksDiff = daysDiff / 7;
-    return weeksDiff % interval == 0;
+    if (interval > 1 && weeksDiff % interval != 0) return false;
+    // COUNT for weekly: count how many BYDAY days per week
+    if (count > 0) {
+      int daysPerWeek = 1;
+      if (bd) {
+        daysPerWeek = 0;
+        const char* p = bd + 6;
+        while (*p && *p != ';') {
+          if (*p >= 'A' && *p <= 'Z' && *(p+1) >= 'A' && *(p+1) <= 'Z') {
+            daysPerWeek++;
+            p += 2;
+          } else p++;
+        }
+        if (daysPerWeek < 1) daysPerWeek = 1;
+      }
+      int occurrencesPerWeek = daysPerWeek;
+      int fullWeeks = weeksDiff / interval;
+      // Rough upper bound: full weeks * days/week + days in current week
+      int totalOccurrences = fullWeeks * occurrencesPerWeek + 1;
+      if (totalOccurrences > count) return false;
+    }
+    return true;
   }
 
   // --- MONTHLY ---
@@ -336,18 +368,22 @@ bool isRecurringToday(const char* startYMD, const char* rrule,
       targetDay = (startYMD[6] - '0') * 10 + (startYMD[7] - '0');
     }
     if (todayMday != targetDay) return false;
-    if (interval == 1) return true;
-    return monthsBetweenYMD(startYMD, todayYMD) % interval == 0;
+    int monthsDiff = monthsBetweenYMD(startYMD, todayYMD);
+    if (interval > 1 && monthsDiff % interval != 0) return false;
+    if (count > 0 && (monthsDiff / interval) + 1 > count) return false;
+    return true;
   }
 
   // --- YEARLY ---
   if (strstr(rrule, "FREQ=YEARLY")) {
     if (strncmp(todayYMD + 4, startYMD + 4, 4) != 0) return false;
-    if (interval == 1) return true;
     int y1, y2;
     sscanf(startYMD, "%4d", &y1);
     sscanf(todayYMD, "%4d", &y2);
-    return (y2 - y1) % interval == 0;
+    int yearsDiff = y2 - y1;
+    if (interval > 1 && yearsDiff % interval != 0) return false;
+    if (count > 0 && (yearsDiff / interval) + 1 > count) return false;
+    return true;
   }
 
   return false;
@@ -446,6 +482,8 @@ void tryAddEvent(const char* summary, const char* dtstart, const char* dtend,
                 ev.title, ev.startHour, ev.startMin,
                 ev.endHour, ev.endMin,
                 ev.allDay ? " [all-day]" : "");
+  if (rrule[0])
+    Serial.printf("    rrule: %s  start: %s\n", rrule, dtstart);
   eventCount++;
 }
 
@@ -592,8 +630,14 @@ bool fetchCalendarEvents()
               { strncpy(dtend,val,sizeof(dtend)-1); dtend[sizeof(dtend)-1]='\0'; }
             else if (propLen==8  && strncmp(L,"DURATION",8)==0)
               { strncpy(dur,val,sizeof(dur)-1); dur[sizeof(dur)-1]='\0'; }
-            else if (propLen==5  && strncmp(L,"RRULE",5)==0)
-              { strncpy(rrule,val,sizeof(rrule)-1); rrule[sizeof(rrule)-1]='\0'; }
+            else if (propLen==5  && strncmp(L,"RRULE",5)==0) {
+              int vlen = strlen(val);
+              int cplen = (vlen < 255) ? vlen : 255;
+              memcpy(rrule, val, cplen);
+              rrule[cplen] = '\0';
+              if (vlen > 250)
+                Serial.printf("  [WARN] RRULE truncated: val=%d, copied=%d\n", vlen, cplen);
+            }
             else if (propLen==13 && strncmp(L,"RECURRENCE-ID",13)==0)
               { strncpy(recurrenceId,val,sizeof(recurrenceId)-1); recurrenceId[sizeof(recurrenceId)-1]='\0'; }
             else if (propLen==6  && strncmp(L,"EXDATE",6)==0) {
