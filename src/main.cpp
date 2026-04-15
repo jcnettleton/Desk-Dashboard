@@ -13,6 +13,7 @@
 #include <HTTPClient.h>
 #include <GxEPD2_BW.h>
 #include <time.h>
+#include <ArduinoJson.h>
 
 // Adafruit GFX FreeFonts
 #include <Fonts/FreeSansBold18pt7b.h>
@@ -125,369 +126,9 @@ void syncTime()
 }
 
 // ============================================================
-// iCal stream parser — helpers
+// Sort events array by start time (insertion sort)
 // ============================================================
 
-// Convert a UTC datetime to local time using the configured timezone.
-void utcToLocal(int &year, int &month, int &day, int &hour, int &minute)
-{
-  struct tm utcTm;
-  memset(&utcTm, 0, sizeof(utcTm));
-  utcTm.tm_year  = year - 1900;
-  utcTm.tm_mon   = month - 1;
-  utcTm.tm_mday  = day;
-  utcTm.tm_hour  = hour;
-  utcTm.tm_min   = minute;
-  utcTm.tm_isdst = 0;
-
-  setenv("TZ", "UTC0", 1);
-  tzset();
-  time_t epoch = mktime(&utcTm);
-
-  setenv("TZ", TIMEZONE, 1);
-  tzset();
-
-  struct tm loc;
-  localtime_r(&epoch, &loc);
-  year   = loc.tm_year + 1900;
-  month  = loc.tm_mon + 1;
-  day    = loc.tm_mday;
-  hour   = loc.tm_hour;
-  minute = loc.tm_min;
-}
-
-// Parsed datetime from an iCal value.
-struct ICalDT {
-  int  year, month, day, hour, min;
-  bool dateOnly;
-};
-
-// Parse "20260414T090000", "20260414T150000Z", or "20260414".
-ICalDT parseICalDT(const char* val)
-{
-  ICalDT dt = {0, 0, 0, 0, 0, false};
-  int len = strlen(val);
-  if (len < 8) return dt;
-
-  sscanf(val, "%4d%2d%2d", &dt.year, &dt.month, &dt.day);
-  if (len == 8) { dt.dateOnly = true; return dt; }
-
-  if (len >= 15) sscanf(val + 9, "%2d%2d", &dt.hour, &dt.min);
-
-  if (val[len - 1] == 'Z')
-    utcToLocal(dt.year, dt.month, dt.day, dt.hour, dt.min);
-
-  return dt;
-}
-
-// Parse DURATION value like "PT1H30M" into hours and minutes.
-void parseDuration(const char* dur, int &hours, int &minutes)
-{
-  hours = 0; minutes = 0;
-  const char* p = dur;
-  if (*p == 'P') p++;
-  if (*p == 'T') p++;
-  int num = 0;
-  while (*p) {
-    if (*p >= '0' && *p <= '9') { num = num * 10 + (*p - '0'); }
-    else if (*p == 'H') { hours = num; num = 0; }
-    else if (*p == 'M') { minutes = num; num = 0; }
-    else num = 0;
-    p++;
-  }
-}
-
-// Convert a YYYYMMDD string to a time_t (midnight UTC) for date arithmetic.
-time_t ymdToEpoch(const char* ymd)
-{
-  struct tm t;
-  memset(&t, 0, sizeof(t));
-  int y, m, d;
-  sscanf(ymd, "%4d%2d%2d", &y, &m, &d);
-  t.tm_year = y - 1900;
-  t.tm_mon  = m - 1;
-  t.tm_mday = d;
-  // Use UTC to avoid DST issues in day counting
-  setenv("TZ", "UTC0", 1);  tzset();
-  time_t e = mktime(&t);
-  setenv("TZ", TIMEZONE, 1); tzset();
-  return e;
-}
-
-// Count whole days between two YYYYMMDD strings.
-int daysBetweenYMD(const char* from, const char* to)
-{
-  time_t a = ymdToEpoch(from);
-  time_t b = ymdToEpoch(to);
-  return (int)((b - a) / 86400);
-}
-
-// Count months between two YYYYMMDD strings.
-int monthsBetweenYMD(const char* from, const char* to)
-{
-  int y1, m1, d1, y2, m2, d2;
-  sscanf(from, "%4d%2d%2d", &y1, &m1, &d1);
-  sscanf(to,   "%4d%2d%2d", &y2, &m2, &d2);
-  return (y2 - y1) * 12 + (m2 - m1);
-}
-
-// Return day-of-week (0=Sun) for a "YYYYMMDD" string.
-int wdayOf(const char* ymd)
-{
-  struct tm t;
-  memset(&t, 0, sizeof(t));
-  int y, m, d;
-  sscanf(ymd, "%4d%2d%2d", &y, &m, &d);
-  t.tm_year = y - 1900;
-  t.tm_mon  = m - 1;
-  t.tm_mday = d;
-  mktime(&t);
-  return t.tm_wday;
-}
-
-// Check whether today appears in a comma-separated list of iCal datetimes.
-// Handles both local and UTC (trailing Z) formats.
-bool isExcludedToday(const char* exdates, const char* todayYMD)
-{
-  char buf[24];
-  const char* p = exdates;
-  while (*p) {
-    while (*p == ',' || *p == ' ') p++;
-    if (!*p) break;
-    // Copy one value token
-    int i = 0;
-    while (*p && *p != ',' && i < (int)sizeof(buf) - 1) buf[i++] = *p++;
-    buf[i] = '\0';
-    // Parse through the same UTC-to-local logic
-    ICalDT dt = parseICalDT(buf);
-    char dtYMD[9];
-    sprintf(dtYMD, "%04d%02d%02d", dt.year, dt.month, dt.day);
-    if (strcmp(dtYMD, todayYMD) == 0) return true;
-  }
-  return false;
-}
-
-// Check if a recurring event (RRULE) fires on today's date.
-// Now properly handles INTERVAL.
-bool isRecurringToday(const char* startYMD, const char* rrule,
-                      const char* todayYMD, int todayWday, int todayMday)
-{
-  if (strcmp(todayYMD, startYMD) < 0) return false;
-  if (strcmp(todayYMD, startYMD) == 0) return true;  // start date always fires
-
-  // Detect truncated RRULE (e.g. "FREQ=WEEKLY;UNTI" where UNTIL= was cut off)
-  int rlen = strlen(rrule);
-  const char* lastSemi = strrchr(rrule, ';');
-  if (lastSemi && !strchr(lastSemi, '=')) {
-    Serial.printf("  [WARN] Truncated RRULE (%d chars): %s\n", rlen, rrule);
-    return false;
-  }
-
-  // Check UNTIL end date
-  const char* u = strstr(rrule, "UNTIL=");
-  if (u) {
-    char untilBuf[24];
-    strncpy(untilBuf, u + 6, sizeof(untilBuf) - 1);
-    untilBuf[sizeof(untilBuf) - 1] = '\0';
-    char* sc = strchr(untilBuf, ';');
-    if (sc) *sc = '\0';
-    ICalDT untilDt = parseICalDT(untilBuf);
-    char untilYMD[9];
-    sprintf(untilYMD, "%04d%02d%02d", untilDt.year, untilDt.month, untilDt.day);
-    if (strcmp(todayYMD, untilYMD) > 0) return false;
-  }
-
-  // Parse INTERVAL (default 1)
-  int interval = 1;
-  const char* iv = strstr(rrule, "INTERVAL=");
-  if (iv) interval = atoi(iv + 9);
-  if (interval < 1) interval = 1;
-
-  // Parse COUNT (0 = unlimited)
-  int count = 0;
-  const char* cv = strstr(rrule, "COUNT=");
-  if (cv) count = atoi(cv + 6);
-
-  // --- DAILY ---
-  if (strstr(rrule, "FREQ=DAILY")) {
-    int daysDiff = daysBetweenYMD(startYMD, todayYMD);
-    if (interval > 1 && daysDiff % interval != 0) return false;
-    if (count > 0 && (daysDiff / interval) + 1 > count) return false;
-    return true;
-  }
-
-  // --- WEEKLY ---
-  if (strstr(rrule, "FREQ=WEEKLY")) {
-    bool dayMatch = false;
-    const char* bd = strstr(rrule, "BYDAY=");
-    if (bd) {
-      static const char* abbr[] = {"SU","MO","TU","WE","TH","FR","SA"};
-      const char* want = abbr[todayWday];
-      const char* p = bd + 6;
-      while (*p && *p != ';') {
-        if (p[0] == want[0] && p[1] == want[1]) { dayMatch = true; break; }
-        p++;
-      }
-    } else {
-      dayMatch = (wdayOf(startYMD) == todayWday);
-    }
-    if (!dayMatch) return false;
-    int daysDiff = daysBetweenYMD(startYMD, todayYMD);
-    int weeksDiff = daysDiff / 7;
-    if (interval > 1 && weeksDiff % interval != 0) return false;
-    // COUNT for weekly: count how many BYDAY days per week
-    if (count > 0) {
-      int daysPerWeek = 1;
-      if (bd) {
-        daysPerWeek = 0;
-        const char* p = bd + 6;
-        while (*p && *p != ';') {
-          if (*p >= 'A' && *p <= 'Z' && *(p+1) >= 'A' && *(p+1) <= 'Z') {
-            daysPerWeek++;
-            p += 2;
-          } else p++;
-        }
-        if (daysPerWeek < 1) daysPerWeek = 1;
-      }
-      int occurrencesPerWeek = daysPerWeek;
-      int fullWeeks = weeksDiff / interval;
-      // Rough upper bound: full weeks * days/week + days in current week
-      int totalOccurrences = fullWeeks * occurrencesPerWeek + 1;
-      if (totalOccurrences > count) return false;
-    }
-    return true;
-  }
-
-  // --- MONTHLY ---
-  if (strstr(rrule, "FREQ=MONTHLY")) {
-    int targetDay;
-    const char* bm = strstr(rrule, "BYMONTHDAY=");
-    if (bm) {
-      targetDay = atoi(bm + 11);
-    } else {
-      targetDay = (startYMD[6] - '0') * 10 + (startYMD[7] - '0');
-    }
-    if (todayMday != targetDay) return false;
-    int monthsDiff = monthsBetweenYMD(startYMD, todayYMD);
-    if (interval > 1 && monthsDiff % interval != 0) return false;
-    if (count > 0 && (monthsDiff / interval) + 1 > count) return false;
-    return true;
-  }
-
-  // --- YEARLY ---
-  if (strstr(rrule, "FREQ=YEARLY")) {
-    if (strncmp(todayYMD + 4, startYMD + 4, 4) != 0) return false;
-    int y1, y2;
-    sscanf(startYMD, "%4d", &y1);
-    sscanf(todayYMD, "%4d", &y2);
-    int yearsDiff = y2 - y1;
-    if (interval > 1 && yearsDiff % interval != 0) return false;
-    if (count > 0 && (yearsDiff / interval) + 1 > count) return false;
-    return true;
-  }
-
-  return false;
-}
-
-// Try to add a parsed VEVENT to events[] if it occurs today.
-void tryAddEvent(const char* summary, const char* dtstart, const char* dtend,
-                 const char* duration, const char* rrule, const char* exdates,
-                 const char* recurrenceId,
-                 const char* todayYMD, int todayWday, int todayMday)
-{
-  if (!summary[0] || !dtstart[0]) return;
-  if (eventCount >= MAX_EVENTS) return;
-
-  // --- Handle RECURRENCE-ID (this is an override for one instance) ---
-  bool isOverride = (recurrenceId[0] != '\0');
-  if (isOverride) {
-    ICalDT ridDt = parseICalDT(recurrenceId);
-    char ridYMD[9];
-    sprintf(ridYMD, "%04d%02d%02d", ridDt.year, ridDt.month, ridDt.day);
-    if (strcmp(ridYMD, todayYMD) != 0) return;  // override for another day
-    // Falls through to add using this event's DTSTART/DTEND
-  }
-
-  ICalDT sdt = parseICalDT(dtstart);
-  char startYMD[9];
-  sprintf(startYMD, "%04d%02d%02d", sdt.year, sdt.month, sdt.day);
-
-  // --- Does this event occur today? ---
-  bool today = false;
-  if (recurrenceId[0]) {
-    today = true;  // already confirmed above
-  } else if (rrule[0]) {
-    today = isRecurringToday(startYMD, rrule, todayYMD, todayWday, todayMday);
-  } else {
-    today = (strcmp(startYMD, todayYMD) == 0);
-    // Multi-day event: check if today falls between start and end
-    if (!today && dtend[0]) {
-      ICalDT edt = parseICalDT(dtend);
-      char endYMD[9];
-      sprintf(endYMD, "%04d%02d%02d", edt.year, edt.month, edt.day);
-      if (strcmp(startYMD, todayYMD) < 0 && strcmp(todayYMD, endYMD) < 0)
-        today = true;
-    }
-  }
-  if (!today) return;
-
-  if (exdates[0] && isExcludedToday(exdates, todayYMD)) return;
-
-  // --- If this is a RECURRENCE-ID override, replace any existing match ---
-  if (isOverride) {
-    for (int i = 0; i < eventCount; i++) {
-      if (strcmp(events[i].title, summary) == 0) {
-        // Replace the recurring instance with this override
-        Serial.printf("  [OVERRIDE] \"%-.30s\" replacing existing entry\n", summary);
-        // We'll fill events[i] below instead of events[eventCount]
-        // Swap it to be rebuilt
-        eventCount--;  // will be re-incremented at end
-        if (i < eventCount)
-          events[i] = events[eventCount]; // move last into this slot
-        break;
-      }
-    }
-  }
-
-  // --- Build CalEvent ---
-  CalEvent &ev = events[eventCount];
-  strncpy(ev.title, summary, sizeof(ev.title) - 1);
-  ev.title[sizeof(ev.title) - 1] = '\0';
-  ev.allDay = sdt.dateOnly;
-
-  if (!sdt.dateOnly) {
-    ev.startHour = sdt.hour;
-    ev.startMin  = sdt.min;
-
-    if (dtend[0]) {
-      ICalDT edt = parseICalDT(dtend);
-      ev.endHour = edt.hour;
-      ev.endMin  = edt.min;
-    } else if (duration[0]) {
-      int dH, dM;
-      parseDuration(duration, dH, dM);
-      ev.endMin  = ev.startMin + dM;
-      ev.endHour = ev.startHour + dH + ev.endMin / 60;
-      ev.endMin %= 60;
-    } else {
-      ev.endHour = ev.startHour + 1;
-      ev.endMin  = ev.startMin;
-    }
-  } else {
-    ev.startHour = HOUR_START; ev.startMin = 0;
-    ev.endHour   = HOUR_END;   ev.endMin   = 0;
-  }
-
-  Serial.printf("  + \"%s\" %02d:%02d-%02d:%02d%s\n",
-                ev.title, ev.startHour, ev.startMin,
-                ev.endHour, ev.endMin,
-                ev.allDay ? " [all-day]" : "");
-  if (rrule[0])
-    Serial.printf("    rrule: %s  start: %s\n", rrule, dtstart);
-  eventCount++;
-}
-
-// Sort events array by start time (insertion sort).
 void sortEvents()
 {
   for (int i = 1; i < eventCount; i++) {
@@ -502,26 +143,8 @@ void sortEvents()
   }
 }
 
-// Remove duplicate events (same title + same start time).
-void dedup()
-{
-  for (int i = 0; i < eventCount; i++) {
-    for (int j = i + 1; j < eventCount; ) {
-      if (strcmp(events[i].title, events[j].title) == 0 &&
-          events[i].startHour == events[j].startHour &&
-          events[i].startMin  == events[j].startMin) {
-        Serial.printf("  [DEDUP] removing duplicate \"%s\"\n", events[j].title);
-        events[j] = events[eventCount - 1];
-        eventCount--;
-      } else {
-        j++;
-      }
-    }
-  }
-}
-
 // ============================================================
-// Fetch calendar events via private iCal URL
+// Fetch calendar events via Google Apps Script (JSON)
 // ============================================================
 
 bool fetchCalendarEvents()
@@ -531,17 +154,7 @@ bool fetchCalendarEvents()
     return false;
   }
 
-  struct tm nowTm;
-  if (!getLocalTime(&nowTm)) {
-    Serial.println("Can't get local time — skipping fetch.");
-    return false;
-  }
-  char todayYMD[9];
-  strftime(todayYMD, sizeof(todayYMD), "%Y%m%d", &nowTm);
-  int todayWday = nowTm.tm_wday;
-  int todayMday = nowTm.tm_mday;
-
-  Serial.printf("Fetching iCal feed (today = %s)...\n", todayYMD);
+  Serial.println("Fetching calendar via Apps Script...");
 
   WiFiClientSecure *client = new WiFiClientSecure;
   client->setInsecure();
@@ -553,160 +166,87 @@ bool fetchCalendarEvents()
 
   bool success = false;
 
-  if (https.begin(*client, ICAL_URL)) {
+  if (https.begin(*client, APPS_SCRIPT_URL)) {
     int httpCode = https.GET();
     Serial.printf("HTTP response: %d\n", httpCode);
 
     if (httpCode == HTTP_CODE_OK) {
-      int contentLen = https.getSize();
-      Serial.printf("Content-Length: %d (%d KB)\n",
-                    contentLen, contentLen > 0 ? contentLen / 1024 : -1);
-      WiFiClient *stream = https.getStreamPtr();
-      eventCount = 0;
+      String payload = https.getString();
+      Serial.printf("Payload: %d bytes\n", payload.length());
 
-      bool inEvent = false;
-      int  nested  = 0;
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, payload);
+      if (err) {
+        Serial.printf("JSON parse error: %s\n", err.c_str());
+      } else if (!doc.is<JsonArray>()) {
+        // Could be an error object like {"error":"unauthorized"}
+        const char* error = doc["error"];
+        Serial.printf("API error: %s\n", error ? error : "unexpected response");
+      } else {
+        JsonArray arr = doc.as<JsonArray>();
+        eventCount = 0;
 
-      static char summary[60], dtstart[24], dtend[24];
-      static char dur[24], rrule[256], exdates[512], recurrenceId[24];
-      summary[0] = dtstart[0] = dtend[0] = '\0';
-      dur[0] = rrule[0] = exdates[0] = recurrenceId[0] = '\0';
+        for (JsonObject ev : arr) {
+          if (eventCount >= MAX_EVENTS) break;
 
-      // Read line-by-line using a char buffer (avoids String overhead)
-      static const int LINE_BUF_SZ = 512;
-      static char lineBuf[LINE_BUF_SZ];
-      int  lineLen = 0;
+          const char* title = ev["title"] | "";
+          const char* start = ev["start"] | "";
+          const char* end   = ev["end"]   | "";
+          bool allDay       = ev["allDay"] | false;
 
-      // For iCal line unfolding, we accumulate into a "logical line"
-      static const int LOGIC_BUF_SZ = 1024;
-      static char logicBuf[LOGIC_BUF_SZ];
-      int  logicLen = 0;
+          CalEvent &ce = events[eventCount];
+          strncpy(ce.title, title, sizeof(ce.title) - 1);
+          ce.title[sizeof(ce.title) - 1] = '\0';
+          ce.allDay = allDay;
 
-      unsigned long t0 = millis();
-      unsigned long bytesRead = 0;
-      int eventsScanned = 0;
-      bool timedOut = false;
-
-      auto processLogicLine = [&]() {
-        if (logicLen == 0) return;
-        logicBuf[logicLen] = '\0';
-        const char* L = logicBuf;
-
-        if (strcmp(L, "BEGIN:VEVENT") == 0) {
-          inEvent = true;
-          nested = 0;
-          summary[0] = dtstart[0] = dtend[0] = '\0';
-          dur[0] = rrule[0] = exdates[0] = recurrenceId[0] = '\0';
-          eventsScanned++;
-          if (eventsScanned % 1000 == 0)
-            Serial.printf("  ... %d VEVENTs, %lu KB\n",
-                          eventsScanned, bytesRead / 1024);
-        }
-        else if (inEvent && strncmp(L, "BEGIN:", 6) == 0) {
-          nested++;
-        }
-        else if (inEvent && strncmp(L, "END:", 4) == 0) {
-          if (nested > 0) {
-            nested--;
-          } else if (strcmp(L, "END:VEVENT") == 0) {
-            inEvent = false;
-            tryAddEvent(summary, dtstart, dtend, dur, rrule, exdates,
-                        recurrenceId, todayYMD, todayWday, todayMday);
-          }
-        }
-        else if (inEvent && nested == 0) {
-          const char* colon = strchr(L, ':');
-          if (colon) {
-            const char* val = colon + 1;
-            int keyLen = colon - L;
-            const char* semi = (const char*)memchr(L, ';', keyLen);
-            int propLen = semi ? (int)(semi - L) : keyLen;
-
-            if      (propLen==7  && strncmp(L,"SUMMARY",7)==0)
-              { strncpy(summary,val,sizeof(summary)-1); summary[sizeof(summary)-1]='\0'; }
-            else if (propLen==7  && strncmp(L,"DTSTART",7)==0)
-              { strncpy(dtstart,val,sizeof(dtstart)-1); dtstart[sizeof(dtstart)-1]='\0'; }
-            else if (propLen==5  && strncmp(L,"DTEND",5)==0)
-              { strncpy(dtend,val,sizeof(dtend)-1); dtend[sizeof(dtend)-1]='\0'; }
-            else if (propLen==8  && strncmp(L,"DURATION",8)==0)
-              { strncpy(dur,val,sizeof(dur)-1); dur[sizeof(dur)-1]='\0'; }
-            else if (propLen==5  && strncmp(L,"RRULE",5)==0) {
-              int vlen = strlen(val);
-              int cplen = (vlen < 255) ? vlen : 255;
-              memcpy(rrule, val, cplen);
-              rrule[cplen] = '\0';
-              if (vlen > 250)
-                Serial.printf("  [WARN] RRULE truncated: val=%d, copied=%d\n", vlen, cplen);
-            }
-            else if (propLen==13 && strncmp(L,"RECURRENCE-ID",13)==0)
-              { strncpy(recurrenceId,val,sizeof(recurrenceId)-1); recurrenceId[sizeof(recurrenceId)-1]='\0'; }
-            else if (propLen==6  && strncmp(L,"EXDATE",6)==0) {
-              if (exdates[0]) strncat(exdates,",",sizeof(exdates)-strlen(exdates)-1);
-              strncat(exdates,val,sizeof(exdates)-strlen(exdates)-1);
-            }
-          }
-        }
-      };
-
-      // --- Buffered chunk reading (much faster than byte-by-byte) ---
-      static const int CHUNK_SZ = 4096;
-      static uint8_t chunk[CHUNK_SZ];
-      int chunkPos = 0, chunkLen = 0;
-
-      while (true) {
-        if (millis() - t0 > 120000) { timedOut = true; break; }  // 120s timeout
-
-        // Refill chunk buffer when exhausted
-        if (chunkPos >= chunkLen) {
-          int avail = stream->available();
-          if (avail > 0) {
-            chunkLen = stream->readBytes(chunk, min(avail, CHUNK_SZ));
-            chunkPos = 0;
-          } else if (!stream->connected()) {
-            break;  // server closed connection — we got all data
+          if (allDay) {
+            ce.startHour = HOUR_START; ce.startMin = 0;
+            ce.endHour   = HOUR_END;   ce.endMin   = 0;
           } else {
-            delay(2);
-            continue;
+            // Parse ISO 8601 timestamps (e.g. "2026-04-15T09:00:00.000Z")
+            // Convert UTC to local time
+            struct tm utcTm;
+            memset(&utcTm, 0, sizeof(utcTm));
+            sscanf(start, "%4d-%2d-%2dT%2d:%2d",
+                   &utcTm.tm_year, &utcTm.tm_mon, &utcTm.tm_mday,
+                   &utcTm.tm_hour, &utcTm.tm_min);
+            utcTm.tm_year -= 1900;
+            utcTm.tm_mon  -= 1;
+
+            setenv("TZ", "UTC0", 1); tzset();
+            time_t epoch = mktime(&utcTm);
+            setenv("TZ", TIMEZONE, 1); tzset();
+            struct tm loc;
+            localtime_r(&epoch, &loc);
+            ce.startHour = loc.tm_hour;
+            ce.startMin  = loc.tm_min;
+
+            memset(&utcTm, 0, sizeof(utcTm));
+            sscanf(end, "%4d-%2d-%2dT%2d:%2d",
+                   &utcTm.tm_year, &utcTm.tm_mon, &utcTm.tm_mday,
+                   &utcTm.tm_hour, &utcTm.tm_min);
+            utcTm.tm_year -= 1900;
+            utcTm.tm_mon  -= 1;
+
+            setenv("TZ", "UTC0", 1); tzset();
+            epoch = mktime(&utcTm);
+            setenv("TZ", TIMEZONE, 1); tzset();
+            localtime_r(&epoch, &loc);
+            ce.endHour = loc.tm_hour;
+            ce.endMin  = loc.tm_min;
           }
+
+          Serial.printf("  + \"%s\" %02d:%02d-%02d:%02d%s\n",
+                        ce.title, ce.startHour, ce.startMin,
+                        ce.endHour, ce.endMin,
+                        ce.allDay ? " [all-day]" : "");
+          eventCount++;
         }
 
-        // Process bytes from the chunk
-        while (chunkPos < chunkLen) {
-          char b = (char)chunk[chunkPos++];
-          bytesRead++;
-
-          if (b == '\n') {
-            if (lineLen > 0 && lineBuf[lineLen - 1] == '\r') lineLen--;
-            lineBuf[lineLen] = '\0';
-
-            if (lineLen > 0 && (lineBuf[0] == ' ' || lineBuf[0] == '\t')) {
-              int appendLen = lineLen - 1;
-              if (logicLen + appendLen < LOGIC_BUF_SZ - 1) {
-                memcpy(logicBuf + logicLen, lineBuf + 1, appendLen);
-                logicLen += appendLen;
-              }
-            } else {
-              processLogicLine();
-              logicLen = (lineLen < LOGIC_BUF_SZ - 1) ? lineLen : LOGIC_BUF_SZ - 1;
-              memcpy(logicBuf, lineBuf, logicLen);
-            }
-            lineLen = 0;
-          } else {
-            if (lineLen < LINE_BUF_SZ - 1) lineBuf[lineLen++] = b;
-          }
-        }
+        sortEvents();
+        Serial.printf("Loaded %d events for today.\n", eventCount);
+        success = true;
       }
-      // Process final buffered line
-      processLogicLine();
-
-      sortEvents();
-      dedup();
-      unsigned long elapsed = millis() - t0;
-      Serial.printf("Loaded %d events for today (%lu KB, %d VEVENTs, %lus%s).\n",
-                     eventCount, bytesRead / 1024,
-                     eventsScanned, elapsed / 1000,
-                     timedOut ? " TIMEOUT" : "");
-      success = true;
     } else {
       Serial.printf("HTTP GET failed: %s\n", https.errorToString(httpCode).c_str());
     }

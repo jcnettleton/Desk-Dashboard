@@ -4,9 +4,10 @@
 #define WIFI_SSID       "your-wifi-ssid"
 #define WIFI_PASS       "your-wifi-password"
 
-// Private iCal URL from Google Calendar:
-//   Calendar Settings → Integrate calendar → Secret address in iCal format
-#define ICAL_URL        "https://calendar.google.com/calendar/ical/you%40example.com/private-XXXX/basic.ics"
+// Google Apps Script calendar proxy URL:
+//   Deploy apps_script/calendar.js as a web app, then paste the URL
+//   with your secret token appended, e.g. ...exec?token=MY_SECRET
+#define APPS_SCRIPT_URL "https://script.google.com/macros/s/YOUR_DEPLOY_ID/exec?token=YOUR_SECRET"
 
 // POSIX timezone string — find yours at:
 // https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
