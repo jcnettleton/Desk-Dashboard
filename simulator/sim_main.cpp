@@ -340,8 +340,8 @@ void drawEvents()
 
       // Black outline: draw at 8 neighbouring offsets
       canvas.setTextColor(GxEPD_BLACK);
-      for (int8_t dy = -1; dy <= 1; dy++) {
-        for (int8_t dx = -1; dx <= 1; dx++) {
+      for (int8_t dy = -2; dy <= 2; dy++) {
+        for (int8_t dx = -2; dx <= 2; dx++) {
           if (dx == 0 && dy == 0) continue;
           canvas.setCursor(textX + dx, textY + dy);
           canvas.print(truncated);

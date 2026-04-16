@@ -1,8 +1,10 @@
 // Copy this file to config.h and fill in your values.
 // config.h is git-ignored — your credentials stay local.
 
-#define WIFI_SSID       "your-wifi-ssid"
-#define WIFI_PASS       "your-wifi-password"
+#define WIFI1_SSID      "your-home-wifi-ssid"
+#define WIFI1_PASS      "your-home-wifi-password"
+#define WIFI2_SSID      "your-work-wifi-ssid"
+#define WIFI2_PASS      "your-work-wifi-password"
 
 // Google Apps Script calendar proxy URL:
 //   Deploy apps_script/calendar.js as a web app, then paste the URL

@@ -93,19 +93,26 @@ void drawPartialScreen();
 
 void connectWiFi()
 {
-  Serial.printf("Connecting to WiFi \"%s\"...\n", WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 40) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
+  const char* ssids[] = { WIFI1_SSID, WIFI2_SSID };
+  const char* passwords[] = { WIFI1_PASS, WIFI2_PASS };
+
+  for (int net = 0; net < 2; net++) {
+    Serial.printf("Trying WiFi \"%s\"...\n", ssids[net]);
+    WiFi.begin(ssids[net], passwords[net]);
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("\nWiFi connected to \"%s\"  IP: %s\n", ssids[net], WiFi.localIP().toString().c_str());
+      return;
+    }
+    Serial.printf("\nFailed to connect to \"%s\"\n", ssids[net]);
+    WiFi.disconnect();
   }
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\nWiFi connected!  IP: %s\n", WiFi.localIP().toString().c_str());
-  } else {
-    Serial.println("\nWiFi connection FAILED — calendar won't update.");
-  }
+  Serial.println("All WiFi networks failed — calendar won't update.");
 }
 
 // ============================================================
@@ -591,10 +598,10 @@ void drawEvents()
       int textX = drawX + 4;
       int textY = drawY + 3 + (int)th;  // 3px top padding + ascent
 
-      // Black outline: draw at 8 neighbouring offsets
+      // Black outline: draw at 2px radius offsets
       display.setTextColor(GxEPD_BLACK);
-      for (int8_t dy = -1; dy <= 1; dy++) {
-        for (int8_t dx = -1; dx <= 1; dx++) {
+      for (int8_t dy = -2; dy <= 2; dy++) {
+        for (int8_t dx = -2; dx <= 2; dx++) {
           if (dx == 0 && dy == 0) continue;
           display.setCursor(textX + dx, textY + dy);
           display.print(truncated);
