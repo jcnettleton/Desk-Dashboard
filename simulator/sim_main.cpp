@@ -233,31 +233,58 @@ void computeOverlapColumns()
   }
 }
 
-// ---- 4×4 Bayer ordered-dither matrix (thresholds 0–15) ----
-static const uint8_t bayer4[4][4] = {
-  { 0,  8,  2, 10},
-  {12,  4, 14,  6},
-  { 3, 11,  1,  9},
-  {15,  7, 13,  5}
-};
-
+// Fill a rounded rect with Atkinson-dithered diagonal gradient
 void fillRoundRectDithered(GFXcanvas1 &c, int16_t x, int16_t y, int16_t w, int16_t h, int16_t r)
 {
   c.fillRoundRect(x, y, w, h, r, GxEPD_BLACK);
 
-  float scale = (w + h > 2) ? (16.0f * 0.6f) / (float)(w + h - 2) : 0;
+  if (w < 3 || h < 3) return;
 
-  for (int16_t py = y + 1; py < y + h - 1; py++) {
-    int dy = py - y;
-    for (int16_t px = x + 1; px < x + w - 1; px++) {
-      int dx = px - x;
-      float val = (float)(dx + dy) * scale;
-      uint8_t thr = bayer4[py & 3][px & 3];
-      if (val > (float)thr) {
-        c.drawPixel(px, py, GxEPD_WHITE);
+  int iw = w - 2, ih = h - 2;
+  int n = iw * ih;
+  int16_t *buf = (int16_t *)malloc(n * sizeof(int16_t));
+  if (!buf) return;
+
+  float lo = 35.0f;
+  float hi = 215.0f;
+  float range = hi - lo;
+  float denom = (iw + ih > 2) ? (float)(iw + ih - 2) : 1.0f;
+  for (int row = 0; row < ih; row++) {
+    for (int col = 0; col < iw; col++) {
+      float t = (float)(col + row) / denom;
+      buf[row * iw + col] = (int16_t)(lo + t * range);
+    }
+  }
+
+  // Atkinson error diffusion (distributes 6/8 of error)
+  for (int row = 0; row < ih; row++) {
+    for (int col = 0; col < iw; col++) {
+      int idx = row * iw + col;
+      int16_t old = buf[idx];
+      int16_t val = (old > 127) ? 255 : 0;
+      buf[idx] = val;
+      int16_t err = (old - val) / 8;
+
+      if (col + 1 < iw)                           buf[idx + 1]      += err;
+      if (col + 2 < iw)                           buf[idx + 2]      += err;
+      if (row + 1 < ih) {
+        if (col - 1 >= 0)                          buf[idx + iw - 1] += err;
+                                                   buf[idx + iw]     += err;
+        if (col + 1 < iw)                          buf[idx + iw + 1] += err;
+      }
+      if (row + 2 < ih)                            buf[idx + 2*iw]   += err;
+    }
+  }
+
+  for (int row = 0; row < ih; row++) {
+    for (int col = 0; col < iw; col++) {
+      if (buf[row * iw + col] > 127) {
+        c.drawPixel(x + 1 + col, y + 1 + row, GxEPD_WHITE);
       }
     }
   }
+
+  free(buf);
 }
 
 void drawEvents()
