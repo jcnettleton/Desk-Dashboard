@@ -443,6 +443,9 @@ void drawNowIndicator()
   int pillY = y - pillH / 2;
   int pillR = 3;
 
+  // Clear gutter area behind the pill to cover hour labels
+  canvas.fillRect(0, pillY, LABEL_W, pillH, GxEPD_WHITE);
+
   // Draw horizontal line across the timeline area
   canvas.drawFastHLine(LABEL_W, y, SCREEN_W - LABEL_W - 2, GxEPD_BLACK);
 
@@ -451,33 +454,6 @@ void drawNowIndicator()
   canvas.setTextColor(GxEPD_WHITE);
   canvas.setCursor(pillX + pillPad, pillY + 2);
   canvas.print(timeBuf);
-
-  // Redraw any hour labels that overlap the pill in white (inverted)
-  for (int h = HOUR_START + 1; h < HOUR_END; h++) {
-    int hy = timeToY(h, 0);
-    int labelTop = hy - 4;
-    int labelBot = hy + 4;
-    int pillTop  = pillY;
-    int pillBot  = pillY + pillH;
-
-    if (labelBot <= pillTop || labelTop >= pillBot) continue;
-
-    char label[6];
-    if (h == 12) {
-      strcpy(label, "12pm");
-    } else if (h < 12) {
-      sprintf(label, "%dam", h);
-    } else {
-      sprintf(label, "%dpm", h - 12);
-    }
-
-    int ltw = strlen(label) * 6;
-    int lx = LABEL_W - ltw - 1;
-    int ly = hy - 4;
-    canvas.setTextColor(GxEPD_WHITE);
-    canvas.setCursor(lx, ly);
-    canvas.print(label);
-  }
 
   canvas.setTextColor(GxEPD_BLACK);
 }
