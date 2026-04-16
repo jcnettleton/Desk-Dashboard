@@ -427,23 +427,40 @@ void drawNowIndicator()
 
   int y = timeToY(hour, minute);
 
-  // Draw filled black ball centered in the gutter
-  int cx = LABEL_W / 2;
-  canvas.fillCircle(cx, y, NOW_BALL_R, GxEPD_BLACK);
+  // Format current time for the pill
+  char timeBuf[8];
+  int dispH = hour > 12 ? hour - 12 : (hour == 0 ? 12 : hour);
+  sprintf(timeBuf, "%d:%02d", dispH, minute);
 
-  // Redraw any hour labels that overlap the ball in white (inverted)
-  canvas.setFont();        // Built-in 6×8 font
+  // Pill sized to text, right-aligned in gutter
+  canvas.setFont();
   canvas.setTextSize(1);
+  int tw = strlen(timeBuf) * 6;
+  int pillPad = 4;
+  int pillH = 12;
+  int pillW = tw + pillPad * 2;
+  int pillX = LABEL_W - pillW;
+  int pillY = y - pillH / 2;
+  int pillR = 3;
 
+  // Draw horizontal line across the timeline area
+  canvas.drawFastHLine(LABEL_W, y, SCREEN_W - LABEL_W - 2, GxEPD_BLACK);
+
+  // Draw the pill (black rounded rect with white text)
+  canvas.fillRoundRect(pillX, pillY, pillW, pillH, pillR, GxEPD_BLACK);
+  canvas.setTextColor(GxEPD_WHITE);
+  canvas.setCursor(pillX + pillPad, pillY + 2);
+  canvas.print(timeBuf);
+
+  // Redraw any hour labels that overlap the pill in white (inverted)
   for (int h = HOUR_START + 1; h < HOUR_END; h++) {
     int hy = timeToY(h, 0);
     int labelTop = hy - 4;
     int labelBot = hy + 4;
-    int ballTop  = y - NOW_BALL_R;
-    int ballBot  = y + NOW_BALL_R;
+    int pillTop  = pillY;
+    int pillBot  = pillY + pillH;
 
-    // Check if label overlaps the arrow
-    if (labelBot <= ballTop || labelTop >= ballBot) continue;
+    if (labelBot <= pillTop || labelTop >= pillBot) continue;
 
     char label[6];
     if (h == 12) {
@@ -454,8 +471,8 @@ void drawNowIndicator()
       sprintf(label, "%dpm", h - 12);
     }
 
-    int tw = strlen(label) * 6;
-    int lx = LABEL_W - tw - 1;
+    int ltw = strlen(label) * 6;
+    int lx = LABEL_W - ltw - 1;
     int ly = hy - 4;
     canvas.setTextColor(GxEPD_WHITE);
     canvas.setCursor(lx, ly);
