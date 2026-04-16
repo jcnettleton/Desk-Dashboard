@@ -43,17 +43,21 @@ static const int SCREEN_H          = 792;
 
 static const int HEADER_H          = 42;     // Date header
 static const int FOOTER_H          = 18;     // "Updated HH:MM" bar
-static const int TIMELINE_Y        = HEADER_H;
-static const int TIMELINE_H        = SCREEN_H - HEADER_H - FOOTER_H; // 732px
 static const int FOOTER_Y          = SCREEN_H - FOOTER_H;
 
 static const int HOUR_START        = 9;      // 9 AM
 static const int HOUR_END          = 17;     // 5 PM
 static const int TOTAL_MINUTES     = (HOUR_END - HOUR_START) * 60;  // 480
 
-static const int LABEL_W           = 48;     // Width of hour-label gutter
+static const int LABEL_W           = 30;     // Width of hour-label gutter
 static const int EVENT_X           = LABEL_W + 2;
-static const int EVENT_W           = SCREEN_W - EVENT_X - 4; // ~228px
+static const int EVENT_W           = SCREEN_W - EVENT_X - 4;
+static const int EVENT_GAP         = 2;      // px gap between adjacent event blocks
+static const int EVENT_RADIUS      = 4;      // rounded corner radius
+
+// Dynamic timeline bounds — adjusted at runtime when all-day banners are present
+static int TIMELINE_Y = HEADER_H;
+static int TIMELINE_H = SCREEN_H - HEADER_H - FOOTER_H; // 732px default
 
 // ---- Calendar event storage ----
 struct CalEvent {
@@ -479,65 +483,79 @@ void drawEvents()
     int ex   = EVENT_X + col * colW;
     int ew   = (col == cols - 1) ? (EVENT_W - col * colW) : colW; // last col gets remainder
 
-    // Draw filled block
-    display.fillRect(ex, y1, ew, blockH, GxEPD_BLACK);
+    // Inset for gaps between adjacent blocks
+    int drawX = ex + EVENT_GAP;
+    int drawY = y1 + EVENT_GAP;
+    int drawW = ew - EVENT_GAP * 2;
+    int drawH = blockH - EVENT_GAP;
+    if (drawW < 4) drawW = 4;
+    if (drawH < 2) drawH = 2;
+
+    display.fillRoundRect(drawX, drawY, drawW, drawH, EVENT_RADIUS, GxEPD_BLACK);
 
     // Draw title (inverted: white on black)
-    if (blockH >= 16) {
-      display.setFont(&FreeSansBold9pt7b);
+    if (drawH >= 14) {
+      display.setFont(&FreeSans9pt7b);
       display.setTextColor(GxEPD_WHITE);
 
       char truncated[64];
-      truncateToFit(ev.title, ew - 8, truncated, sizeof(truncated));
+      truncateToFit(ev.title, drawW - 8, truncated, sizeof(truncated));
 
       int16_t tx, ty;
       uint16_t tw, th;
       display.getTextBounds(truncated, 0, 0, &tx, &ty, &tw, &th);
 
-      int textY = y1 + 3 + (int)th;  // 3px top padding + ascent
-      display.setCursor(ex + 4, textY);
+      int textY = drawY + 3 + (int)th;  // 3px top padding + ascent
+      display.setCursor(drawX + 4, textY);
       display.print(truncated);
 
       // If block is tall enough, show time range on second line
-      if (blockH >= 34) {
+      if (drawH >= 30) {
         char timeBuf[20];
         sprintf(timeBuf, "%d:%02d - %d:%02d",
                 ev.startHour > 12 ? ev.startHour - 12 : ev.startHour, ev.startMin,
                 ev.endHour > 12 ? ev.endHour - 12 : ev.endHour, ev.endMin);
 
-        display.setFont(&FreeSans9pt7b);
-        display.setCursor(ex + 4, textY + (int)th + 3);
+        display.setFont();
+        display.setTextSize(1);
+        display.setCursor(drawX + 4, textY + 4);
         display.print(timeBuf);
       }
 
       display.setTextColor(GxEPD_BLACK);
     }
   }
+}
 
-  // All-day events: banner between header and timeline start
+void drawAllDayBanners()
+{
   bool hasAllDay = false;
   for (int i = 0; i < eventCount; i++) {
     if (events[i].allDay) { hasAllDay = true; break; }
   }
+  if (!hasAllDay) return;
 
-  if (hasAllDay) {
-    int bannerY = TIMELINE_Y;
-    display.setFont(&FreeSans9pt7b);
-    display.setTextColor(GxEPD_BLACK);
-    for (int i = 0; i < eventCount; i++) {
-      if (!events[i].allDay) continue;
+  int bannerY = HEADER_H;
+  display.setFont(&FreeSans9pt7b);
+  display.setTextColor(GxEPD_BLACK);
 
-      int16_t tx, ty;
-      uint16_t tw, th;
-      display.getTextBounds(events[i].title, 0, 0, &tx, &ty, &tw, &th);
+  for (int i = 0; i < eventCount; i++) {
+    if (!events[i].allDay) continue;
 
-      // Draw a small outlined banner
-      display.drawRect(EVENT_X, bannerY + 2, EVENT_W, (int)th + 6, GxEPD_BLACK);
-      display.setCursor(EVENT_X + 4, bannerY + 2 + (int)th + 2);
-      display.print(events[i].title);
-      bannerY += (int)th + 10;
-    }
+    int16_t tx, ty;
+    uint16_t tw, th;
+    display.getTextBounds(events[i].title, 0, 0, &tx, &ty, &tw, &th);
+
+    int bannerH = (int)th + 6;
+    display.drawRoundRect(EVENT_X, bannerY + 2, EVENT_W, bannerH, 3, GxEPD_BLACK);
+    display.setCursor(EVENT_X + 4, bannerY + 2 + (int)th + 2);
+    display.print(events[i].title);
+    bannerY += bannerH + 4;
   }
+
+  // Shift timeline down below the banners
+  TIMELINE_Y = bannerY + 2;
+  TIMELINE_H = FOOTER_Y - TIMELINE_Y;
 }
 
 void drawNowIndicator()
@@ -599,10 +617,15 @@ void drawFullScreen()
   Serial.println("Drawing full screen...");
   display.setRotation(DISPLAY_ROTATION);
   display.setFullWindow();
+  // Reset timeline bounds to defaults
+  TIMELINE_Y = HEADER_H;
+  TIMELINE_H = SCREEN_H - HEADER_H - FOOTER_H;
+
   display.firstPage();
   do {
     display.fillScreen(GxEPD_WHITE);
     drawHeader();
+    drawAllDayBanners();
     drawHourGrid();
     drawEvents();
     drawNowIndicator();
@@ -644,11 +667,16 @@ void updateNowLine()
   Serial.printf("Now line: %02d:%02d → y=%d (was %d)\n", hour, minute, newY, prevNowLineY);
 
   display.setRotation(DISPLAY_ROTATION);
+  // Reset timeline bounds to defaults
+  TIMELINE_Y = HEADER_H;
+  TIMELINE_H = SCREEN_H - HEADER_H - FOOTER_H;
+
   display.setPartialWindow(0, 0, SCREEN_W, SCREEN_H);
   display.firstPage();
   do {
     display.fillScreen(GxEPD_WHITE);
     drawHeader();
+    drawAllDayBanners();
     drawHourGrid();
     drawEvents();
     drawNowIndicator();
