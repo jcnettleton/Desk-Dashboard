@@ -233,6 +233,33 @@ void computeOverlapColumns()
   }
 }
 
+// ---- 4×4 Bayer ordered-dither matrix (thresholds 0–15) ----
+static const uint8_t bayer4[4][4] = {
+  { 0,  8,  2, 10},
+  {12,  4, 14,  6},
+  { 3, 11,  1,  9},
+  {15,  7, 13,  5}
+};
+
+void fillRoundRectDithered(GFXcanvas1 &c, int16_t x, int16_t y, int16_t w, int16_t h, int16_t r)
+{
+  c.fillRoundRect(x, y, w, h, r, GxEPD_BLACK);
+
+  float scale = (w + h > 2) ? (16.0f * 0.6f) / (float)(w + h - 2) : 0;
+
+  for (int16_t py = y + 1; py < y + h - 1; py++) {
+    int dy = py - y;
+    for (int16_t px = x + 1; px < x + w - 1; px++) {
+      int dx = px - x;
+      float val = (float)(dx + dy) * scale;
+      uint8_t thr = bayer4[py & 3][px & 3];
+      if (val > (float)thr) {
+        c.drawPixel(px, py, GxEPD_WHITE);
+      }
+    }
+  }
+}
+
 void drawEvents()
 {
   computeOverlapColumns();
@@ -268,7 +295,7 @@ void drawEvents()
     if (drawW < 4) drawW = 4;
     if (drawH < 2) drawH = 2;
 
-    canvas.fillRoundRect(drawX, drawY, drawW, drawH, EVENT_RADIUS, GxEPD_BLACK);
+    fillRoundRectDithered(canvas, drawX, drawY, drawW, drawH, EVENT_RADIUS);
 
     if (drawH >= 14) {
       canvas.setFont(&FreeSans9pt7b);
@@ -281,8 +308,21 @@ void drawEvents()
       uint16_t tw, th;
       canvas.getTextBounds(truncated, 0, 0, &tx, &ty, &tw, &th);
 
+      int textX = drawX + 4;
       int textY = drawY + 3 + (int)th;
-      canvas.setCursor(drawX + 4, textY);
+
+      // Black outline: draw at 8 neighbouring offsets
+      canvas.setTextColor(GxEPD_BLACK);
+      for (int8_t dy = -1; dy <= 1; dy++) {
+        for (int8_t dx = -1; dx <= 1; dx++) {
+          if (dx == 0 && dy == 0) continue;
+          canvas.setCursor(textX + dx, textY + dy);
+          canvas.print(truncated);
+        }
+      }
+      // White fill on top
+      canvas.setTextColor(GxEPD_WHITE);
+      canvas.setCursor(textX, textY);
       canvas.print(truncated);
 
       if (drawH >= 30) {
@@ -291,9 +331,21 @@ void drawEvents()
                 ev.startHour > 12 ? ev.startHour - 12 : ev.startHour, ev.startMin,
                 ev.endHour > 12 ? ev.endHour - 12 : ev.endHour, ev.endMin);
 
+        int timeX = drawX + 4;
+        int timeY = textY + 4;
         canvas.setFont();
         canvas.setTextSize(1);
-        canvas.setCursor(drawX + 4, textY + 4);
+
+        canvas.setTextColor(GxEPD_BLACK);
+        for (int8_t dy = -1; dy <= 1; dy++) {
+          for (int8_t dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            canvas.setCursor(timeX + dx, timeY + dy);
+            canvas.print(timeBuf);
+          }
+        }
+        canvas.setTextColor(GxEPD_WHITE);
+        canvas.setCursor(timeX, timeY);
         canvas.print(timeBuf);
       }
 

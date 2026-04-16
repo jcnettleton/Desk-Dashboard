@@ -478,6 +478,36 @@ void computeOverlapColumns()
   }
 }
 
+// ---- 4×4 Bayer ordered-dither matrix (thresholds 0–15) ----
+static const uint8_t bayer4[4][4] PROGMEM = {
+  { 0,  8,  2, 10},
+  {12,  4, 14,  6},
+  { 3, 11,  1,  9},
+  {15,  7, 13,  5}
+};
+
+// Fill a rounded rect with a diagonal dither gradient
+// (solid black top-left → ~60 % white bottom-right)
+void fillRoundRectDithered(int16_t x, int16_t y, int16_t w, int16_t h, int16_t r)
+{
+  // Solid-black base gives clean anti-aliased edges
+  display.fillRoundRect(x, y, w, h, r, GxEPD_BLACK);
+
+  float scale = (w + h > 2) ? (16.0f * 0.6f) / (float)(w + h - 2) : 0;
+
+  for (int16_t py = y + 1; py < y + h - 1; py++) {
+    int dy = py - y;
+    for (int16_t px = x + 1; px < x + w - 1; px++) {
+      int dx = px - x;
+      float val = (float)(dx + dy) * scale;           // 0 … ~9.6
+      uint8_t thr = pgm_read_byte(&bayer4[py & 3][px & 3]);
+      if (val > (float)thr) {
+        display.drawPixel(px, py, GxEPD_WHITE);
+      }
+    }
+  }
+}
+
 void drawEvents()
 {
   computeOverlapColumns();
@@ -516,7 +546,7 @@ void drawEvents()
     if (drawW < 4) drawW = 4;
     if (drawH < 2) drawH = 2;
 
-    display.fillRoundRect(drawX, drawY, drawW, drawH, EVENT_RADIUS, GxEPD_BLACK);
+    fillRoundRectDithered(drawX, drawY, drawW, drawH, EVENT_RADIUS);
 
     // Draw title (inverted: white on black)
     if (drawH >= 14) {
@@ -530,8 +560,21 @@ void drawEvents()
       uint16_t tw, th;
       display.getTextBounds(truncated, 0, 0, &tx, &ty, &tw, &th);
 
+      int textX = drawX + 4;
       int textY = drawY + 3 + (int)th;  // 3px top padding + ascent
-      display.setCursor(drawX + 4, textY);
+
+      // Black outline: draw at 8 neighbouring offsets
+      display.setTextColor(GxEPD_BLACK);
+      for (int8_t dy = -1; dy <= 1; dy++) {
+        for (int8_t dx = -1; dx <= 1; dx++) {
+          if (dx == 0 && dy == 0) continue;
+          display.setCursor(textX + dx, textY + dy);
+          display.print(truncated);
+        }
+      }
+      // White fill on top
+      display.setTextColor(GxEPD_WHITE);
+      display.setCursor(textX, textY);
       display.print(truncated);
 
       // If block is tall enough, show time range on second line
@@ -541,9 +584,21 @@ void drawEvents()
                 ev.startHour > 12 ? ev.startHour - 12 : ev.startHour, ev.startMin,
                 ev.endHour > 12 ? ev.endHour - 12 : ev.endHour, ev.endMin);
 
+        int timeX = drawX + 4;
+        int timeY = textY + 4;
         display.setFont();
         display.setTextSize(1);
-        display.setCursor(drawX + 4, textY + 4);
+
+        display.setTextColor(GxEPD_BLACK);
+        for (int8_t dy = -1; dy <= 1; dy++) {
+          for (int8_t dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            display.setCursor(timeX + dx, timeY + dy);
+            display.print(timeBuf);
+          }
+        }
+        display.setTextColor(GxEPD_WHITE);
+        display.setCursor(timeX, timeY);
         display.print(timeBuf);
       }
 
