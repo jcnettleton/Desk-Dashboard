@@ -79,6 +79,7 @@ static const unsigned long FETCH_INTERVAL      = 60UL * 1000;       // 60 sec
 static const unsigned long FULL_REFRESH_INTERVAL = 60UL * 60 * 1000; // 1 hour
 static const int ACTIVE_START = 8;   // screen active from 8 AM
 static const int ACTIVE_END   = 18;  // screen sleeps at 6 PM
+static const bool SLEEP_ENABLED = false;  // set true to enable off-hours sleep
 static const unsigned long SLEEP_CHECK_US = 15UL * 60 * 1000000; // deep-sleep 15 min
 
 unsigned long lastNowLineUpdate  = 0;
@@ -743,6 +744,7 @@ void drawNowIndicator()
     int ballTop  = y - NOW_BALL_R;
     int ballBot  = y + NOW_BALL_R;
 
+    // Check if label overlaps the arrow
     if (labelBot <= ballTop || labelTop >= ballBot) continue;
 
     char label[6];
@@ -914,7 +916,7 @@ void setup()
   syncTime();
 
   // If outside active hours, blank screen and deep sleep
-  if (!isActiveHours()) {
+  if (SLEEP_ENABLED && !isActiveHours()) {
     enterSleepMode();
     return;  // never reached
   }
@@ -942,7 +944,7 @@ void loop()
   unsigned long now = millis();
 
   // --- Check if we've left active hours ---
-  if (!isActiveHours()) {
+  if (SLEEP_ENABLED && !isActiveHours()) {
     enterSleepMode();
     return;  // never reached
   }

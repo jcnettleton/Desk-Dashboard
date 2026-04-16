@@ -442,6 +442,7 @@ void drawNowIndicator()
     int ballTop  = y - NOW_BALL_R;
     int ballBot  = y + NOW_BALL_R;
 
+    // Check if label overlaps the arrow
     if (labelBot <= ballTop || labelTop >= ballBot) continue;
 
     char label[6];
