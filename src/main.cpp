@@ -55,6 +55,8 @@ static const int EVENT_W           = SCREEN_W - EVENT_X - 4;
 static const int EVENT_GAP         = 2;      // px gap between adjacent event blocks
 static const int EVENT_RADIUS      = 4;      // rounded corner radius
 
+static const int NOW_BALL_R        = 10;     // radius of the "now" ball indicator
+
 // Dynamic timeline bounds — adjusted at runtime when all-day banners are present
 static int TIMELINE_Y = HEADER_H;
 static int TIMELINE_H = SCREEN_H - HEADER_H - FOOTER_H; // 732px default
@@ -72,14 +74,18 @@ CalEvent events[MAX_EVENTS];
 int      eventCount = 0;
 
 // ---- Timing intervals (ms) ----
-static const unsigned long NOW_LINE_INTERVAL   = 2UL * 60 * 1000;   // 2 min
-static const unsigned long FETCH_INTERVAL      = 10UL * 60 * 1000;  // 10 min
+static const unsigned long NOW_LINE_INTERVAL   = 15UL * 60 * 1000;  // 15 min
+static const unsigned long FETCH_INTERVAL      = 60UL * 1000;       // 60 sec
 static const unsigned long FULL_REFRESH_INTERVAL = 60UL * 60 * 1000; // 1 hour
 
 unsigned long lastNowLineUpdate  = 0;
 unsigned long lastFetch          = 0;
 unsigned long lastFullRefresh    = 0;
 int           prevNowLineY       = -1;
+
+// Forward declarations
+void drawFullScreen();
+void drawPartialScreen();
 
 // ============================================================
 // WiFi
@@ -262,6 +268,25 @@ bool fetchCalendarEvents()
   delete client;
   return success;
 }
+
+// Compute a simple hash of the current event data for change detection
+static uint32_t computeEventsHash()
+{
+  uint32_t h = 5381;
+  h = h * 33 + (uint32_t)eventCount;
+  for (int i = 0; i < eventCount; i++) {
+    const CalEvent &e = events[i];
+    for (const char* p = e.title; *p; p++) h = h * 33 + (uint8_t)*p;
+    h = h * 33 + (uint32_t)e.startHour;
+    h = h * 33 + (uint32_t)e.startMin;
+    h = h * 33 + (uint32_t)e.endHour;
+    h = h * 33 + (uint32_t)e.endMin;
+    h = h * 33 + (uint32_t)e.allDay;
+  }
+  return h;
+}
+
+static uint32_t lastEventsHash = 0;
 
 // ============================================================
 // Layout helpers
@@ -572,15 +597,42 @@ void drawNowIndicator()
   int y = timeToY(hour, minute);
   prevNowLineY = y;
 
-  // Draw a solid line with a small triangle marker on the left edge
-  display.drawFastHLine(LABEL_W + 1, y, SCREEN_W - LABEL_W - 1, GxEPD_BLACK);
-  // Small filled triangle on the left as the "now" indicator
-  display.fillTriangle(
-    LABEL_W + 1, y,
-    LABEL_W + 7, y - 4,
-    LABEL_W + 7, y + 4,
-    GxEPD_BLACK
-  );
+  // Draw filled black ball centered in the gutter
+  int cx = LABEL_W / 2;
+  display.fillCircle(cx, y, NOW_BALL_R, GxEPD_BLACK);
+
+  // Redraw any hour labels that overlap the ball in white (inverted)
+  display.setFont();        // Built-in 6×8 font
+  display.setTextSize(1);
+
+  for (int h = HOUR_START + 1; h < HOUR_END; h++) {
+    int hy = timeToY(h, 0);
+    // Label is drawn at ly = hy-4, height 8px, so it spans [hy-4, hy+4)
+    int labelTop = hy - 4;
+    int labelBot = hy + 4;
+    int ballTop  = y - NOW_BALL_R;
+    int ballBot  = y + NOW_BALL_R;
+
+    if (labelBot <= ballTop || labelTop >= ballBot) continue;
+
+    char label[6];
+    if (h == 12) {
+      strcpy(label, "12pm");
+    } else if (h < 12) {
+      sprintf(label, "%dam", h);
+    } else {
+      sprintf(label, "%dpm", h - 12);
+    }
+
+    int tw = strlen(label) * 6;
+    int lx = LABEL_W - tw - 1;
+    int ly = hy - 4;
+    display.setTextColor(GxEPD_WHITE);
+    display.setCursor(lx, ly);
+    display.print(label);
+  }
+
+  display.setTextColor(GxEPD_BLACK);
 }
 
 void drawFooter()
@@ -592,7 +644,7 @@ void drawFooter()
   display.drawFastHLine(0, FOOTER_Y, SCREEN_W, GxEPD_BLACK);
 
   char buf[30];
-  strftime(buf, sizeof(buf), "Updated %H:%M", &t);
+  strftime(buf, sizeof(buf), "Updated %l:%M %p", &t);
 
   display.setFont();  // Built-in 6×8 font
   display.setTextSize(1);
@@ -615,6 +667,8 @@ void drawFooter()
 void drawFullScreen()
 {
   Serial.println("Drawing full screen...");
+  display.init(0);  // wake display from sleep (silent, no debug output)
+  SPI.begin(EPD_SCK, -1, EPD_MOSI, EPD_CS);  // re-assert custom SPI pins
   display.setRotation(DISPLAY_ROTATION);
   display.setFullWindow();
   // Reset timeline bounds to defaults
@@ -631,11 +685,41 @@ void drawFullScreen()
     drawNowIndicator();
     drawFooter();
   } while (display.nextPage());
+  display.hibernate();
   Serial.println("Full screen draw complete.");
 }
 
 // ============================================================
-// Partial refresh: just the "now" line area
+// Partial refresh: full redraw without flash
+// ============================================================
+
+void drawPartialScreen()
+{
+  Serial.println("Drawing partial screen...");
+  display.init(0);  // wake display from sleep
+  SPI.begin(EPD_SCK, -1, EPD_MOSI, EPD_CS);  // re-assert custom SPI pins
+  display.setRotation(DISPLAY_ROTATION);
+  // Reset timeline bounds to defaults
+  TIMELINE_Y = HEADER_H;
+  TIMELINE_H = SCREEN_H - HEADER_H - FOOTER_H;
+
+  display.setPartialWindow(0, 0, SCREEN_W, SCREEN_H);
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+    drawHeader();
+    drawAllDayBanners();
+    drawHourGrid();
+    drawEvents();
+    drawNowIndicator();
+    drawFooter();
+  } while (display.nextPage());
+  display.hibernate();
+  Serial.println("Partial refresh complete.");
+}
+
+// ============================================================
+// Update now ball position (calls partial refresh)
 // ============================================================
 
 void updateNowLine()
@@ -665,25 +749,7 @@ void updateNowLine()
   // This is cleaner than trying to erase/redraw just the line region
   // since events might overlap the old line position
   Serial.printf("Now line: %02d:%02d → y=%d (was %d)\n", hour, minute, newY, prevNowLineY);
-
-  display.setRotation(DISPLAY_ROTATION);
-  // Reset timeline bounds to defaults
-  TIMELINE_Y = HEADER_H;
-  TIMELINE_H = SCREEN_H - HEADER_H - FOOTER_H;
-
-  display.setPartialWindow(0, 0, SCREEN_W, SCREEN_H);
-  display.firstPage();
-  do {
-    display.fillScreen(GxEPD_WHITE);
-    drawHeader();
-    drawAllDayBanners();
-    drawHourGrid();
-    drawEvents();
-    drawNowIndicator();
-    drawFooter();
-  } while (display.nextPage());
-
-  Serial.println("Partial refresh complete.");
+  drawPartialScreen();
 }
 
 // ============================================================
@@ -720,6 +786,7 @@ void setup()
   // Fetch calendar events
   fetchCalendarEvents();
   lastFetch = millis();
+  lastEventsHash = computeEventsHash();
 
   // Initial full-refresh draw
   drawFullScreen();
@@ -747,9 +814,14 @@ void loop()
     fetchCalendarEvents();
     lastFetch = now;
 
-    // After new data, do a full partial redraw to update events
-    updateNowLine();
-    lastNowLineUpdate = now;
+    // Only redraw if event data actually changed
+    uint32_t newHash = computeEventsHash();
+    if (newHash != lastEventsHash) {
+      Serial.println("Calendar data changed — refreshing display.");
+      lastEventsHash = newHash;
+      drawPartialScreen();
+      lastNowLineUpdate = now;
+    }
   }
 
   // --- Full refresh every FULL_REFRESH_INTERVAL (clears ghosting) ---

@@ -45,6 +45,7 @@ static const int EVENT_X       = LABEL_W + 2;
 static const int EVENT_W       = SCREEN_W - EVENT_X - 4;
 static const int EVENT_GAP     = 2;   // px gap between adjacent event blocks
 static const int EVENT_RADIUS  = 4;   // rounded corner radius
+static const int NOW_BALL_R    = 10;  // radius of the "now" ball indicator
 
 // Dynamic timeline bounds — adjusted at runtime when all-day banners are present
 static int TIMELINE_Y = HEADER_H;
@@ -347,13 +348,41 @@ void drawNowIndicator()
 
   int y = timeToY(hour, minute);
 
-  canvas.drawFastHLine(LABEL_W + 1, y, SCREEN_W - LABEL_W - 1, GxEPD_BLACK);
-  canvas.fillTriangle(
-    LABEL_W + 1, y,
-    LABEL_W + 7, y - 4,
-    LABEL_W + 7, y + 4,
-    GxEPD_BLACK
-  );
+  // Draw filled black ball centered in the gutter
+  int cx = LABEL_W / 2;
+  canvas.fillCircle(cx, y, NOW_BALL_R, GxEPD_BLACK);
+
+  // Redraw any hour labels that overlap the ball in white (inverted)
+  canvas.setFont();        // Built-in 6×8 font
+  canvas.setTextSize(1);
+
+  for (int h = HOUR_START + 1; h < HOUR_END; h++) {
+    int hy = timeToY(h, 0);
+    int labelTop = hy - 4;
+    int labelBot = hy + 4;
+    int ballTop  = y - NOW_BALL_R;
+    int ballBot  = y + NOW_BALL_R;
+
+    if (labelBot <= ballTop || labelTop >= ballBot) continue;
+
+    char label[6];
+    if (h == 12) {
+      strcpy(label, "12pm");
+    } else if (h < 12) {
+      sprintf(label, "%dam", h);
+    } else {
+      sprintf(label, "%dpm", h - 12);
+    }
+
+    int tw = strlen(label) * 6;
+    int lx = LABEL_W - tw - 1;
+    int ly = hy - 4;
+    canvas.setTextColor(GxEPD_WHITE);
+    canvas.setCursor(lx, ly);
+    canvas.print(label);
+  }
+
+  canvas.setTextColor(GxEPD_BLACK);
 }
 
 void drawFooter()
@@ -361,7 +390,7 @@ void drawFooter()
   canvas.drawFastHLine(0, FOOTER_Y, SCREEN_W, GxEPD_BLACK);
 
   char buf[30];
-  strftime(buf, sizeof(buf), "Updated %H:%M", &simTime);
+  strftime(buf, sizeof(buf), "Updated %l:%M %p", &simTime);
 
   canvas.setFont();
   canvas.setTextSize(1);
