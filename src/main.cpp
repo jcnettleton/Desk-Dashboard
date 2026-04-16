@@ -74,7 +74,7 @@ CalEvent events[MAX_EVENTS];
 int      eventCount = 0;
 
 // ---- Timing intervals (ms) ----
-static const unsigned long NOW_LINE_INTERVAL   = 15UL * 60 * 1000;  // 15 min
+static const unsigned long NOW_LINE_INTERVAL   = 2UL * 60 * 1000;   // 2 min
 static const unsigned long FETCH_INTERVAL      = 60UL * 1000;       // 60 sec
 static const unsigned long FULL_REFRESH_INTERVAL = 60UL * 60 * 1000; // 1 hour
 
@@ -667,7 +667,7 @@ void drawFooter()
 void drawFullScreen()
 {
   Serial.println("Drawing full screen...");
-  display.init(0);  // wake display from sleep (silent, no debug output)
+  display.init(0, false);  // wake display, initial=false to avoid double-refresh
   SPI.begin(EPD_SCK, -1, EPD_MOSI, EPD_CS);  // re-assert custom SPI pins
   display.setRotation(DISPLAY_ROTATION);
   display.setFullWindow();
@@ -696,7 +696,7 @@ void drawFullScreen()
 void drawPartialScreen()
 {
   Serial.println("Drawing partial screen...");
-  display.init(0);  // wake display from sleep
+  display.init(0, false);  // wake display, initial=false to allow partial refresh
   SPI.begin(EPD_SCK, -1, EPD_MOSI, EPD_CS);  // re-assert custom SPI pins
   display.setRotation(DISPLAY_ROTATION);
   // Reset timeline bounds to defaults
