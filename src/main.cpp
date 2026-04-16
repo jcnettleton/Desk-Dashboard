@@ -77,6 +77,9 @@ int      eventCount = 0;
 static const unsigned long NOW_LINE_INTERVAL   = 2UL * 60 * 1000;   // 2 min
 static const unsigned long FETCH_INTERVAL      = 60UL * 1000;       // 60 sec
 static const unsigned long FULL_REFRESH_INTERVAL = 60UL * 60 * 1000; // 1 hour
+static const int ACTIVE_START = 8;   // screen active from 8 AM
+static const int ACTIVE_END   = 18;  // screen sleeps at 6 PM
+static const unsigned long SLEEP_CHECK_US = 15UL * 60 * 1000000; // deep-sleep 15 min
 
 unsigned long lastNowLineUpdate  = 0;
 unsigned long lastFetch          = 0;
@@ -86,6 +89,43 @@ int           prevNowLineY       = -1;
 // Forward declarations
 void drawFullScreen();
 void drawPartialScreen();
+
+// ============================================================
+// Sleep mode — blank screen + deep sleep outside active hours
+// ============================================================
+
+void enterSleepMode()
+{
+  Serial.println("Outside active hours — blanking display and entering deep sleep.");
+
+  // Disconnect WiFi to save power
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+
+  // Blank the screen to white (healthiest state for E-Ink)
+  display.init(0, false);
+  SPI.begin(EPD_SCK, -1, EPD_MOSI, EPD_CS);
+  display.setRotation(DISPLAY_ROTATION);
+  display.setFullWindow();
+  display.firstPage();
+  do {
+    display.fillScreen(GxEPD_WHITE);
+  } while (display.nextPage());
+  display.hibernate();
+
+  Serial.printf("Deep sleeping for %d minutes...\n", (int)(SLEEP_CHECK_US / 1000000 / 60));
+  Serial.flush();
+  esp_sleep_enable_timer_wakeup(SLEEP_CHECK_US);
+  esp_deep_sleep_start();
+  // Never reaches here — deep sleep resets, will re-enter setup()
+}
+
+bool isActiveHours()
+{
+  struct tm t;
+  if (!getLocalTime(&t)) return true; // if time unknown, stay active
+  return (t.tm_hour >= ACTIVE_START && t.tm_hour < ACTIVE_END);
+}
 
 // ============================================================
 // WiFi
@@ -873,6 +913,12 @@ void setup()
   // Sync time via NTP
   syncTime();
 
+  // If outside active hours, blank screen and deep sleep
+  if (!isActiveHours()) {
+    enterSleepMode();
+    return;  // never reached
+  }
+
   // Fetch calendar events
   fetchCalendarEvents();
   lastFetch = millis();
@@ -894,6 +940,12 @@ void setup()
 void loop()
 {
   unsigned long now = millis();
+
+  // --- Check if we've left active hours ---
+  if (!isActiveHours()) {
+    enterSleepMode();
+    return;  // never reached
+  }
 
   // --- Re-fetch calendar data every FETCH_INTERVAL ---
   if (now - lastFetch >= FETCH_INTERVAL) {
