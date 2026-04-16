@@ -13,6 +13,7 @@
 #include <HTTPClient.h>
 #include <GxEPD2_BW.h>
 #include <time.h>
+#include <sys/time.h>
 #include <ArduinoJson.h>
 
 // Adafruit GFX FreeFonts
@@ -74,13 +75,19 @@ CalEvent events[MAX_EVENTS];
 int      eventCount = 0;
 
 // ---- Timing intervals (ms) ----
-static const unsigned long NOW_LINE_INTERVAL   = 2UL * 60 * 1000;   // 2 min
+static const unsigned long NOW_LINE_INTERVAL   = 1UL * 60 * 1000;   // 1 min
 static const unsigned long FETCH_INTERVAL      = 60UL * 1000;       // 60 sec
 static const unsigned long FULL_REFRESH_INTERVAL = 60UL * 60 * 1000; // 1 hour
 static const int ACTIVE_START = 8;   // screen active from 8 AM
 static const int ACTIVE_END   = 18;  // screen sleeps at 6 PM
 static const bool SLEEP_ENABLED = false;  // set true to enable off-hours sleep
 static const unsigned long SLEEP_CHECK_US = 15UL * 60 * 1000000; // deep-sleep 15 min
+
+// ---- Fake time for testing (set to false for production) ----
+static const bool FAKE_TIME_ENABLED = false;
+static const int  FAKE_START_HOUR   = 10;
+static const int  FAKE_START_MIN    = 25;
+// Advances 1 minute every 10 real seconds so you can watch the pill move
 
 unsigned long lastNowLineUpdate  = 0;
 unsigned long lastFetch          = 0;
@@ -180,6 +187,18 @@ void syncTime()
     Serial.printf("\nTime synced: %s\n", buf);
   } else {
     Serial.println("\nNTP sync failed!");
+  }
+
+  // If fake time enabled, override the system clock
+  if (FAKE_TIME_ENABLED) {
+    struct tm ft = t;  // keep the date from NTP
+    ft.tm_hour = FAKE_START_HOUR;
+    ft.tm_min  = FAKE_START_MIN;
+    ft.tm_sec  = 0;
+    time_t fakeEpoch = mktime(&ft);
+    struct timeval tv = { .tv_sec = fakeEpoch, .tv_usec = 0 };
+    settimeofday(&tv, NULL);
+    Serial.printf("FAKE TIME set to %d:%02d\n", FAKE_START_HOUR, FAKE_START_MIN);
   }
 }
 
@@ -740,7 +759,7 @@ void drawNowIndicator()
   int pillPad = 4;
   int pillH = 12;
   int pillW = tw + pillPad * 2;
-  int pillX = LABEL_W - pillW;
+  int pillX = LABEL_W - pillW + 6;
   int pillY = y - pillH / 2;
   int pillR = 3;
 
@@ -996,8 +1015,19 @@ void loop()
     lastNowLineUpdate = now;
   }
 
-  // --- Update "now" line every NOW_LINE_INTERVAL ---
-  if (now - lastNowLineUpdate >= NOW_LINE_INTERVAL) {
+  // --- Update "now" line every NOW_LINE_INTERVAL (or faster in fake mode) ---
+  unsigned long nowInterval = FAKE_TIME_ENABLED ? 10000UL : NOW_LINE_INTERVAL;
+  if (now - lastNowLineUpdate >= nowInterval) {
+    // In fake mode, advance clock by 1 minute each tick
+    if (FAKE_TIME_ENABLED) {
+      struct timeval tv;
+      gettimeofday(&tv, NULL);
+      tv.tv_sec += 60;  // jump ahead 1 minute
+      settimeofday(&tv, NULL);
+      struct tm ft;
+      getLocalTime(&ft);
+      Serial.printf("FAKE TIME now: %d:%02d\n", ft.tm_hour, ft.tm_min);
+    }
     updateNowLine();
     lastNowLineUpdate = now;
   }

@@ -439,7 +439,7 @@ void drawNowIndicator()
   int pillPad = 4;
   int pillH = 12;
   int pillW = tw + pillPad * 2;
-  int pillX = LABEL_W - pillW;
+  int pillX = LABEL_W - pillW + 6;
   int pillY = y - pillH / 2;
   int pillR = 3;
 
